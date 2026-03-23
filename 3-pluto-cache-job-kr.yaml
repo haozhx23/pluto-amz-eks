@@ -1,0 +1,79 @@
+##############################################################################
+# Pluto Feature Caching Job (run BEFORE training)
+#
+# This step preprocesses nuPlan scenarios into cached features.
+# It is CPU/IO intensive, does NOT need GPU.
+# Data lives on NVMe at /opt/dlami/nvme/nuplan/ (reorganized).
+##############################################################################
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pluto-cache
+  namespace: default
+  labels:
+    app: pluto-cache
+spec:
+  completions: 1
+  parallelism: 1
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: pluto-cache
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        node.kubernetes.io/instance-type: ml.p5en.48xlarge
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: pluto-cache
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: pluto-cache
+          # image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/pluto-train:latest
+          image: 633205212955.dkr.ecr.us-west-2.amazonaws.com/pluto-train-kr:2603221650
+          imagePullPolicy: Always
+          resources:
+            requests:
+              cpu: "172"
+              memory: "1843Gi"
+              nvidia.com/gpu: "8"
+            limits:
+              cpu: "172"
+              memory: "1843Gi"
+              nvidia.com/gpu: "8"
+          env:
+            - name: PHASE
+              value: "cache"
+            - name: RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES
+              value: "1"
+            - name: NUPLAN_DATA_ROOT
+              value: "/nvme/nuplan"
+            - name: NUPLAN_MAPS_ROOT
+              value: "/nvme/nuplan/maps"
+            - name: CACHE_PATH
+              value: "/nvme/nuplan/exp/cache_pluto"
+            - name: CACHE_WORKERS
+              value: "160"
+            - name: SCENARIO_FILTER
+              value: "training_scenarios_1M"
+            - name: EXTRA_ARGS
+              value: "cache.cleanup_cache=false"
+          volumeMounts:
+            - name: nvme
+              mountPath: /nvme
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: nvme
+          hostPath:
+            path: /opt/dlami/nvme
+            type: Directory
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: "16Gi"

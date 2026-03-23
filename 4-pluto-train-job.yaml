@@ -1,0 +1,104 @@
+##############################################################################
+# Pluto Training Job on EKS with H200 GPU
+#
+# Usage:
+#   1. Build & push image:  see build-and-push.sh
+#   2. Edit env vars below (wandb key, etc.)
+#   3. kubectl apply -f pluto-train-job.yaml
+#
+# Data lives on NVMe at /opt/dlami/nvme/nuplan/ (reorganized).
+# Cache must be generated first via pluto-cache-job.yaml.
+##############################################################################
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pluto-train
+  namespace: default
+  labels:
+    app: pluto-train
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: pluto-train
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        node.kubernetes.io/instance-type: ml.p5en.48xlarge
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: pluto
+          image: 633205212955.dkr.ecr.us-west-2.amazonaws.com/pluto-train-kr:2603230154
+          imagePullPolicy: Always
+          resources:
+            requests:
+              cpu: "172"
+              memory: "1843Gi"
+              nvidia.com/gpu: "8"
+            limits:
+              cpu: "172"
+              memory: "1843Gi"
+              nvidia.com/gpu: "8"
+          env:
+            - name: PHASE
+              value: "train"
+
+            # -- Data paths (match reorganized NVMe layout) --
+            - name: NUPLAN_DATA_ROOT
+              value: "/nvme/nuplan"
+            - name: NUPLAN_MAPS_ROOT
+              value: "/nvme/nuplan/maps"
+            - name: CACHE_PATH
+              value: "/nvme/nuplan/exp/cache_pluto"
+
+            # -- Training hyperparams --
+            - name: BATCH_SIZE
+              value: "64"
+            - name: EPOCHS
+              value: "25"
+            - name: LR
+              value: "1e-3"
+            - name: PRECISION
+              value: "32"
+            - name: NATTEN_LOG_LEVEL
+              value: "critical"
+            - name: PYTHONWARNINGS
+              value: "ignore::UserWarning"
+            - name: NUM_WORKERS
+              value: "8"
+
+            # -- WandB (optional) --
+            - name: WANDB_MODE
+              value: "disabled"
+            # - name: WANDB_API_KEY
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: wandb-secret
+            #       key: api-key
+
+            # -- Distributed (single-node defaults) --
+            - name: NNODES
+              value: "1"
+            - name: NPROC_PER_NODE
+              value: "8"
+
+          volumeMounts:
+            - name: nvme
+              mountPath: /nvme
+            - name: shm
+              mountPath: /dev/shm
+
+      volumes:
+        - name: nvme
+          hostPath:
+            path: /opt/dlami/nvme
+            type: Directory
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: "256Gi"

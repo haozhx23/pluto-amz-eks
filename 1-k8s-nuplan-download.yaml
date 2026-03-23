@@ -1,0 +1,115 @@
+# nuPlan data downloader on i3en.6xlarge with NVMe + S3 mount
+# NVMe: /opt/dlami/nvme (13.5TB) -> /nvme in container
+# S3:   s3-claim PVC             -> /s3 in container
+# Runs 2 parallel pods on different nodes, each downloading different files via JOB_COMPLETION_INDEX
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nuplan-download
+spec:
+  completions: 2
+  parallelism: 2
+  template:
+    metadata:
+      labels:
+        app: nuplan-download
+    spec:
+      nodeSelector:
+        node.kubernetes.io/instance-type: ml.p5en.48xlarge
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels:
+                app: nuplan-download
+            topologyKey: kubernetes.io/hostname
+      restartPolicy: Never
+      containers:
+      - name: downloader
+        image: amazon/aws-cli:latest
+        command:
+        - sh
+        - -c
+        - |
+          yum install -y unzip
+
+          S3_PREFIX="s3://motional-nuplan/public/nuplan-v1.1"
+          DEST="/nvme/nuplan-data"
+          mkdir -p "$DEST"
+
+          FILES="
+            nuplan-maps-v1.0.zip
+            nuplan-maps-v1.1.zip
+            nuplan-v1.1_mini.zip
+            nuplan-v1.1_train_boston.zip
+            nuplan-v1.1_train_pittsburgh.zip
+            nuplan-v1.1_train_singapore.zip
+            nuplan-v1.1_train_vegas_1.zip
+            nuplan-v1.1_val.zip
+          "
+
+          # Download & unzip a single file (used as background worker)
+          download_one() {
+            local f="$1"
+            local dir="$DEST/${f%.zip}"
+
+            if [ -d "$dir" ]; then
+              echo "=== SKIP $f (already extracted) ==="
+              return 0
+            fi
+
+            echo "=== [$(date '+%H:%M:%S')] Downloading $f ==="
+            aws s3 cp "$S3_PREFIX/$f" "$DEST/" --no-sign-request --region ap-northeast-1
+            echo "=== [$(date '+%H:%M:%S')] Unzipping $f -> $dir ==="
+            mkdir -p "$dir"
+            unzip -o "$DEST/$f" -d "$dir"
+            # rm -f "$DEST/$f"
+            echo "=== [$(date '+%H:%M:%S')] Done: $f ==="
+          }
+
+          # Launch all downloads in parallel
+          PIDS=""
+          for f in $FILES; do
+            f=$(echo "$f" | xargs)
+            [ -z "$f" ] && continue
+            echo "$f" | grep -q '^#' && continue
+            download_one "$f" &
+            PIDS="$PIDS $!"
+          done
+
+          # Wait for all and collect exit codes
+          FAILED=0
+          for pid in $PIDS; do
+            if ! wait "$pid"; then
+              FAILED=$((FAILED + 1))
+            fi
+          done
+
+          echo "=== All tasks finished (failed: $FAILED) ==="
+          du -sh "$DEST"/*/ 2>/dev/null
+          if [ "$FAILED" -gt 0 ]; then
+            echo "ERROR: $FAILED download(s) failed"
+            exit 1
+          fi
+          echo "Sleeping to keep pod alive for inspection..."
+          sleep 3600
+        volumeMounts:
+        - name: nvme
+          mountPath: /nvme
+        - name: s3-storage
+          mountPath: /s3
+        resources:
+          requests:
+            cpu: "32"
+            memory: 256Gi
+          limits:
+            cpu: "64"
+            memory: 512Gi
+      volumes:
+      - name: nvme
+        hostPath:
+          path: /opt/dlami/nvme
+          type: Directory
+      - name: s3-storage
+        persistentVolumeClaim:
+          claimName: s3-claim

@@ -1,0 +1,102 @@
+##############################################################################
+# Reorganize nuPlan data into the directory structure nuplan-devkit expects.
+# Uses mv (same filesystem, instant).
+#
+# Before:  /nvme/nuplan-data/{zip-name}/data/cache/{split}/*.db
+# After:   /nvme/nuplan/nuplan-v1.1/trainval/*.db   (all splits merged)
+#          /nvme/nuplan/maps/{city}/{version}/
+##############################################################################
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nuplan-reorganize
+spec:
+  completions: 2
+  parallelism: 2
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: nuplan-reorganize
+    spec:
+      nodeSelector:
+        node.kubernetes.io/instance-type: ml.p5en.48xlarge
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: nuplan-reorganize
+              topologyKey: kubernetes.io/hostname
+      restartPolicy: Never
+      containers:
+      - name: reorganize
+        image: amazon/aws-cli:latest
+        command:
+        - sh
+        - -c
+        - |
+          set -euo pipefail
+
+          SRC="/nvme/nuplan-data"
+          DEST="/nvme/nuplan"
+
+          echo "=== Current layout ==="
+          ls -la "$SRC"/
+
+          echo "=== Creating target structure ==="
+          mkdir -p "$DEST/nuplan-v1.1/trainval"
+          mkdir -p "$DEST/exp/cache_pluto"
+
+          # --- Maps ---
+          if [ -d "$SRC/nuplan-maps-v1.0/maps" ]; then
+            echo "Moving maps (v1.0) ..."
+            mv "$SRC/nuplan-maps-v1.0/maps" "$DEST/maps"
+          fi
+
+          if [ -d "$SRC/nuplan-maps-v1.1/nuplan-maps-v1.0" ]; then
+            echo "Merging maps (v1.1) ..."
+            cp -rn "$SRC/nuplan-maps-v1.1/nuplan-maps-v1.0/"* "$DEST/maps/" 2>/dev/null || true
+          fi
+
+          # --- Training data: all splits -> nuplan-v1.1/trainval/ ---
+          move_split() {
+            local split_dir="$1"
+            if [ -d "$split_dir" ]; then
+              local name=$(basename "$split_dir")
+              echo "Moving $name ..."
+              find "$split_dir" -name "*.db" -exec mv {} "$DEST/nuplan-v1.1/trainval/" \;
+            fi
+          }
+
+          move_split "$SRC/nuplan-v1.1_train_boston/data/cache/train_boston"
+          move_split "$SRC/nuplan-v1.1_mini/data/cache/mini"
+          move_split "$SRC/nuplan-v1.1_train_pittsburgh/data/cache/train_pittsburgh"
+          move_split "$SRC/nuplan-v1.1_train_singapore/data/cache/train_singapore"
+          move_split "$SRC/nuplan-v1.1_train_vegas_1/data/cache/train_vegas_1"
+          move_split "$SRC/nuplan-v1.1_val/data/cache/val"
+
+          echo ""
+          echo "=== Result ==="
+          echo "Maps:"
+          ls "$DEST/maps/"
+          echo ""
+          echo "DB files in trainval: $(find "$DEST/nuplan-v1.1/trainval" -name '*.db' | wc -l)"
+          echo ""
+          echo "=== Done ==="
+        volumeMounts:
+        - name: nvme
+          mountPath: /nvme
+        resources:
+          requests:
+            cpu: "2"
+            memory: 4Gi
+          limits:
+            cpu: "4"
+            memory: 8Gi
+      volumes:
+      - name: nvme
+        hostPath:
+          path: /opt/dlami/nvme
+          type: Directory
