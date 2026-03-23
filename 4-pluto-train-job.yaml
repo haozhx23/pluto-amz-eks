@@ -60,7 +60,7 @@ spec:
             - name: BATCH_SIZE
               value: "64"
             - name: EPOCHS
-              value: "25"
+              value: "1"
             - name: LR
               value: "1e-3"
             - name: PRECISION
